@@ -12,6 +12,7 @@ export const endpoints = {
 
   // AI Chat
   agentQueryStream: '/chat/agent/query/stream',
+  studyPlanStream: '/chat/agent/study-plan/stream',
   ragQuery: '/chat/rag/query',
 
   // Sessions
@@ -60,6 +61,7 @@ export const endpoints = {
 
   // Review
   reviewToday: '/review/today',
+  reviewBackfill: '/review/backfill',
   reviewDone: (id: string) => `/review/done/${id}`,
   reviewQuestion: (id: string) => `/review/question/${id}`,
 

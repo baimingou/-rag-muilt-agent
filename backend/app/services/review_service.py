@@ -2,6 +2,7 @@
 回顾服务层 —— 艾宾浩斯间隔重复算法 + 回顾问题生成。
 """
 import json
+import uuid
 from datetime import datetime, timedelta
 
 from sqlalchemy import select, update
@@ -108,6 +109,65 @@ class ReviewService:
             "review_count": new_count,
             "interval_days": next_interval,
             "next_review_at": str(next_at),
+        }
+
+    async def backfill_missing_reviews(self, db: AsyncSession, user_id: str) -> dict:
+        """
+        为当前用户缺失复习记录的历史笔记补建 ReviewRecord。
+        """
+        now = datetime.now()
+
+        note_stmt = select(Note).where(Note.user_id == user_id)
+        note_result = await db.execute(note_stmt)
+        notes = note_result.scalars().all()
+
+        if not notes:
+            return {
+                "success": True,
+                "message": "没有可补建的历史笔记",
+                "created_count": 0,
+                "total_notes": 0,
+            }
+
+        note_ids = [note.id for note in notes]
+        review_stmt = select(ReviewRecord.note_id).where(
+            ReviewRecord.user_id == user_id,
+            ReviewRecord.note_id.in_(note_ids),
+        )
+        review_result = await db.execute(review_stmt)
+        existing_note_ids = set(review_result.scalars().all())
+
+        missing_notes = [note for note in notes if note.id not in existing_note_ids]
+        if not missing_notes:
+            return {
+                "success": True,
+                "message": "所有历史笔记都已存在复习记录",
+                "created_count": 0,
+                "total_notes": len(notes),
+            }
+
+        for note in missing_notes:
+            db.add(
+                ReviewRecord(
+                    id=str(uuid.uuid4()),
+                    note_id=note.id,
+                    user_id=user_id,
+                    next_review_at=now,
+                    interval_days=1,
+                    review_count=0,
+                )
+            )
+
+        await db.commit()
+        logger.info(
+            f"补建历史复习记录完成 user_id={user_id}, created_count={len(missing_notes)}"
+        )
+
+        return {
+            "success": True,
+            "message": f"已补建 {len(missing_notes)} 条复习记录",
+            "created_count": len(missing_notes),
+            "total_notes": len(notes),
         }
 
     async def generate_review_question(self, content: str) -> dict:

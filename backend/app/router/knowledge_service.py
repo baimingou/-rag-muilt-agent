@@ -1,5 +1,6 @@
 import asyncio
 import base64
+import mimetypes
 import os
 import tempfile
 import time
@@ -7,7 +8,6 @@ from collections.abc import AsyncGenerator
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 
-import magic
 from fastapi import HTTPException, UploadFile
 
 from app.core.logger_handler import logger
@@ -24,6 +24,11 @@ ALLOWED_MIME_TYPES = {
 }
 MAX_FILE_SIZE = 20 * 1024 * 1024
 MAX_FOLDER_SIZE = 200 * 1024 * 1024
+
+try:
+    import magic  # type: ignore
+except ImportError:
+    magic = None
 
 
 @dataclass
@@ -85,6 +90,21 @@ def _sync_slice_file(file_content: bytes, filename: str, file_index: int, user_i
 class KnowledgeService:
     """知识库管理服务"""
 
+    @staticmethod
+    def _detect_mime_type(content: bytes, filename: str) -> str:
+        """Best-effort MIME detection with a Windows-friendly fallback."""
+        if magic is not None:
+            try:
+                mime = magic.Magic(mime=True)
+                detected = mime.from_buffer(content)
+                if detected:
+                    return detected
+            except Exception as e:
+                logger.warning(f"【知识库】libmagic 检测失败，回退到扩展名识别: {e}")
+
+        guessed_type, _ = mimetypes.guess_type(filename)
+        return guessed_type or "application/octet-stream"
+
     async def handle_add_vector_single(self, file: UploadFile, user_id: str) -> str:
         """处理添加单个向量逻辑"""
         store = VectorStoreService()
@@ -95,8 +115,7 @@ class KnowledgeService:
         content = await file.read()
         await file.seek(0)
 
-        mime = magic.Magic(mime=True)
-        file_type = mime.from_buffer(content)
+        file_type = self._detect_mime_type(content, file.filename)
 
         file_extension = os.path.splitext(file.filename)[1].lower()
 
@@ -250,7 +269,6 @@ class KnowledgeService:
             logger.error(f"【SSE上传】文件总大小超过限制，总大小: {total_size / (1024 * 1024):.2f}MB，限制: 200MB")
             return [], [self._yield_size_error_event()], total_files
 
-        mime = magic.Magic(mime=True)
         valid_files = []
         current_index = 1
         failed_count = 0
@@ -258,7 +276,7 @@ class KnowledgeService:
         for file_info in files_content:
             file = file_info['file']
             content = file_info['content']
-            file_type = mime.from_buffer(content)
+            file_type = self._detect_mime_type(content, file.filename)
             file_extension = os.path.splitext(file.filename)[1].lower()
 
             if file_type not in ALLOWED_MIME_TYPES and file_extension not in ALLOWED_EXTENSIONS:

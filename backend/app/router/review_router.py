@@ -29,6 +29,18 @@ async def get_today_reviews(
     })
 
 
+@review_router.post("/backfill")
+async def backfill_reviews(
+    user_id: str = Depends(get_current_user_id),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    为当前用户的历史笔记补建缺失的复习记录。
+    """
+    result = await review_service.backfill_missing_reviews(db, user_id)
+    return success_response(message=result["message"], data=result)
+
+
 @review_router.post("/done/{note_id}")
 async def mark_reviewed(
     note_id: str,

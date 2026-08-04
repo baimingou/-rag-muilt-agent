@@ -7,6 +7,7 @@ from fastapi.responses import StreamingResponse
 from fastapi.routing import APIRouter
 
 from app.agent.agent import get_agent_stream_response
+from app.agent.study_workflow import get_study_plan_stream_response
 from app.core.rate_limit import rate_limit
 from app.core.success_response import success_response
 from app.router.chat_service import ChatService, get_router_service
@@ -133,6 +134,26 @@ async def query_stream(
             "Cache-Control": "no-cache",
             "Connection": "keep-alive"
         }
+    )
+
+
+@chat_router.post("/agent/study-plan/stream")
+async def study_plan_stream(
+        request: QueryRequest,
+        user_id: str = Depends(get_current_user_id),
+        _: None = Depends(rate_limit(limit=8, window=60))
+):
+    """基于 Planner-Reviewer 多 Agent 工作流生成学习计划。"""
+    session_id = request.session_id or str(uuid.uuid4())
+    query = request.query or "帮我安排今天的学习计划"
+
+    return StreamingResponse(
+        get_study_plan_stream_response(query, session_id, user_id),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+        },
     )
 
 

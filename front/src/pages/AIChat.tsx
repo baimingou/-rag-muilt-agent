@@ -1,13 +1,14 @@
 import { useState, useRef, useEffect, useCallback } from 'react'
 import { useParams, useNavigate } from 'react-router-dom'
 import { useTranslation } from 'react-i18next'
-import { Send, Sparkles, Bot, User, ChevronDown, ChevronRight, Loader2 } from 'lucide-react'
+import { Send, Sparkles, Bot, User, ChevronDown, ChevronRight, Loader2, CalendarCheck } from 'lucide-react'
 import ReactMarkdown from 'react-markdown'
 import rehypeHighlight from 'rehype-highlight'
 import rehypeRaw from 'rehype-raw'
 import { useSSE } from '../hooks/useSSE'
 import { sessionsApi } from '../api/sessions'
 import { useThemeStore } from '../stores/useThemeStore'
+import { endpoints } from '../api/endpoints'
 
 interface Message {
   role: 'user' | 'assistant'
@@ -88,7 +89,7 @@ export default function AIChat() {
     }
   }, [sessionId, navigate])
 
-  const handleSend = useCallback(async (query: string) => {
+  const handleSend = useCallback(async (query: string, endpoint: string = endpoints.agentQueryStream) => {
     if (!query.trim() || loading) return
 
     const userMsg: Message = { role: 'user', content: query }
@@ -103,7 +104,7 @@ export default function AIChat() {
     let hasResponseStarted = false
 
     await start(
-      '/chat/agent/query/stream',
+      endpoint,
       { query, session_id: sessionId },
       {
         onThinking: (stage, content) => {
@@ -186,6 +187,13 @@ export default function AIChat() {
               </div>
               <h2 className="font-heading text-xl text-[var(--color-text)]">{t('chat.welcome')}</h2>
               <div className="flex flex-wrap justify-center gap-2 max-w-md mx-auto">
+                <button
+                  onClick={() => handleSend('帮我安排今天的学习计划，并检查是否覆盖待复习内容', endpoints.studyPlanStream)}
+                  className="inline-flex items-center gap-2 px-4 py-2 text-xs rounded-full border border-[var(--color-accent)] text-[var(--color-accent)] hover:bg-[var(--color-accent-bg)] transition-colors"
+                >
+                  <CalendarCheck size={14} />
+                  学习规划
+                </button>
                 {quickQuestions.map((q) => (
                   <button
                     key={q}
@@ -297,6 +305,14 @@ export default function AIChat() {
 
       <div className="border-t border-[var(--color-border)] bg-[var(--color-card)] px-6 py-4">
         <div className="max-w-3xl mx-auto flex gap-3">
+          <button
+            onClick={() => handleSend('帮我安排今天的学习计划，并检查是否覆盖待复习内容', endpoints.studyPlanStream)}
+            disabled={loading}
+            title="学习规划"
+            className="flex items-center justify-center w-10 h-10 rounded-lg border border-[var(--color-border)] text-[var(--color-text-secondary)] hover:border-[var(--color-accent)] hover:text-[var(--color-accent)] disabled:opacity-40 transition-colors shrink-0"
+          >
+            <CalendarCheck size={16} />
+          </button>
           <textarea
             value={input}
             onChange={(e) => setInput(e.target.value)}

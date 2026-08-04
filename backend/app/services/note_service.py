@@ -119,7 +119,7 @@ class NoteService:
             logger.error(f"笔记向量化失败 note_id={note_id}: {e}")
 
         # 若用户已提供 tags/category，跳过自动标签生成
-        user_provided_meta = payload.tags is not None or payload.category is not None
+        user_provided_meta = bool(payload.tags) or bool(payload.category)
         if not user_provided_meta:
             asyncio.create_task(self._auto_tag_and_review(note_id, user_id, payload.content))
 

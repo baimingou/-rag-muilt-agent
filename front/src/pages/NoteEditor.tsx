@@ -122,7 +122,12 @@ export default function NoteEditor() {
     setSaving(true)
     try {
       if (isNew) {
-        const res = await notesApi.create({ title, content, category: category || undefined, tags })
+        const res = await notesApi.create({
+          title,
+          content,
+          category: category || undefined,
+          tags: tags.length > 0 ? tags : undefined,
+        })
         localStorage.removeItem(DRAFT_KEY)
         navigate(`/notes/${(res.data as Note).id}`, { replace: true })
       } else if (id) {

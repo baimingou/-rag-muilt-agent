@@ -1,7 +1,7 @@
 import { useEffect, useState, useRef, useCallback } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { useTranslation } from 'react-i18next'
-import { Plus, Search, FileText, Tag, CheckSquare, Square, Settings2, Pin } from 'lucide-react'
+import { Plus, Search, FileText, Tag, CheckSquare, Square, Settings2, Pin, Trash2 } from 'lucide-react'
 import { notesApi } from '../api/notes'
 import type { Note, NoteListResponse } from '../types/api'
 import EmptyState from '../components/common/EmptyState'
@@ -52,8 +52,6 @@ function buildCategoryList(customCategories: string[]) {
   if (order.length === 0) return list
 
   const orderIndex = new Map(order.map((v, i) => [v, i]))
-  const allValues = new Set(list.map((c) => c.value))
-
   return list.sort((a, b) => {
     if (a.value === '') return -1
     if (b.value === '') return 1
@@ -79,12 +77,13 @@ export default function NoteList() {
 
   const [selectMode, setSelectMode] = useState(false)
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set())
-  const longPressTimer = useRef<ReturnType<typeof setTimeout>>()
+  const longPressTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   const pressStartPos = useRef<{ x: number; y: number }>({ x: 0, y: 0 })
   const enteredViaLongPress = useRef(false)
   const pointerMoved = useRef(false)
 
   const [deleteConfirmOpen, setDeleteConfirmOpen] = useState(false)
+  const [deleteTarget, setDeleteTarget] = useState<Note | null>(null)
   const [categoryModalOpen, setCategoryModalOpen] = useState(false)
   const [customCategory, setCustomCategory] = useState('')
   const [allCategories, setAllCategories] = useState(PREDEFINED_CATEGORIES)
@@ -194,7 +193,7 @@ export default function NoteList() {
   const clearLongPress = () => {
     if (longPressTimer.current) {
       clearTimeout(longPressTimer.current)
-      longPressTimer.current = undefined
+      longPressTimer.current = null
     }
   }
 
@@ -204,7 +203,7 @@ export default function NoteList() {
     pointerMoved.current = false
     clearLongPress()
     longPressTimer.current = setTimeout(() => {
-      longPressTimer.current = undefined
+      longPressTimer.current = null
       if (!selectMode) {
         enteredViaLongPress.current = true
         setSelectMode(true)
@@ -282,10 +281,21 @@ export default function NoteList() {
     }
   }
 
-  const handleBatchDelete = async () => {
+  const openSingleDeleteConfirm = (e: React.MouseEvent, note: Note) => {
+    e.stopPropagation()
+    setDeleteTarget(note)
+    setDeleteConfirmOpen(true)
+  }
+
+  const handleDeleteConfirm = async () => {
     try {
-      await notesApi.batchDelete(Array.from(selectedIds))
-      exitSelectMode()
+      if (deleteTarget) {
+        await notesApi.delete(deleteTarget.id)
+        setDeleteTarget(null)
+      } else {
+        await notesApi.batchDelete(Array.from(selectedIds))
+        exitSelectMode()
+      }
       setPage(1)
       refreshCategories()
       loadNotes(1, true)
@@ -454,6 +464,17 @@ export default function NoteList() {
                             className={note.is_pinned ? 'text-[var(--color-accent)] fill-[var(--color-accent)]' : 'text-[var(--color-text-tertiary)]'}
                           />
                         </button>
+                        {!selectMode && (
+                          <button
+                            onClick={(e) => openSingleDeleteConfirm(e, note)}
+                            onPointerDown={(e) => e.stopPropagation()}
+                            onPointerUp={(e) => e.stopPropagation()}
+                            className="p-0.5 rounded text-[var(--color-text-tertiary)] hover:bg-red-500/10 hover:text-red-500 transition-colors"
+                            title="删除笔记"
+                          >
+                            <Trash2 size={14} />
+                          </button>
+                        )}
                         <span className="text-xs text-[var(--color-text-tertiary)]">{formatDate(note.created_at)}</span>
                       </div>
                     </div>
@@ -486,11 +507,18 @@ export default function NoteList() {
 
       <ConfirmDialog
         open={deleteConfirmOpen}
-        onOpenChange={setDeleteConfirmOpen}
+        onOpenChange={(open) => {
+          setDeleteConfirmOpen(open)
+          if (!open) setDeleteTarget(null)
+        }}
         title={t('note.delete')}
-        message={t('note.batch.deleteConfirm', { count: selectedIds.size })}
+        message={
+          deleteTarget
+            ? `确定要删除笔记「${deleteTarget.title || '无标题'}」吗？删除后会同步清理对应向量。`
+            : t('note.batch.deleteConfirm', { count: selectedIds.size })
+        }
         variant="danger"
-        onConfirm={handleBatchDelete}
+        onConfirm={handleDeleteConfirm}
       />
 
       <CategoryModal
