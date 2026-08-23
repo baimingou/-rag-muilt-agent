@@ -31,11 +31,14 @@ class HybridRetriever:
             include=['documents', 'metadatas'],
             where={'user_id': user_id}
         )
+
+
+        # 读取该用户下所有文
         documents = []
         for i, doc_content in enumerate(all_docs_result['documents']):
             metadata = all_docs_result['metadatas'][i] if i < len(all_docs_result['metadatas']) else {}
             documents.append(Document(page_content=doc_content, metadata=metadata))
-
+        # 把 Chroma 原始数据，包装成 LangChain 标准的Document对象列表，给 BM25 工具使用。
         if documents:
             bm25_retriever = BM25Retriever.from_documents(
                 documents=documents,
@@ -70,13 +73,20 @@ class HybridRetriever:
         if not user_id:
             return EmptyRetriever()
 
+        #     根据用户id进行一个过滤文档
         filter_dict = {'user_id': user_id}
+
+        # 向量检索器
         vector_retriever = self.vectors_store.as_retriever(
             search_type='similarity',
             search_kwargs={'k': chroma_config['k'], 'filter': filter_dict},
         )
+
+        # 创建bm25检索器
         bm25_retriever = await self.get_bm25_retriever(user_id)
 
+
+        # 如果没有bm25索引就进行降级使用向量检索
         if bm25_retriever:
             weights = await self.get_dynamic_weights(query)
             ensemble_retriever = EnsembleRetriever(

@@ -119,6 +119,8 @@ class ReorderService:
             model = await self.model
             # 禁用梯度计算，提高推理性能
             import torch
+            # 推理阶段关闭梯度计算，省显存、加速推理，不计算反向传播，rerank
+            # 推理必备。
             with torch.no_grad():
                 scores = model.predict(pairs, batch_size=1)
 

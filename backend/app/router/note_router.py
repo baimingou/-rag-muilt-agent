@@ -33,11 +33,13 @@ async def ensure_note_service():
 
 note_router.dependencies = [Depends(ensure_note_service)]
 
-
+# 创建笔记，写入 MySQL，同时把笔记内容写入 ChromaDB 向量库
 @note_router.post("/create")
 async def create_note(
     payload: NoteCreate,
+    # 获取当前用户id
     user_id: str = Depends(get_current_user_id),
+    #     连接数据库开启事务
     db: AsyncSession = Depends(get_db),
     _: None = Depends(rate_limit(limit=10, window=60)),
 ):
@@ -68,6 +70,8 @@ async def list_notes(
     return success_response(data=NoteListResponse(notes=notes, total_count=total))
 
 
+# 笔记搜索通过语义来搜索  搜索不精准笔记字数多向量化后不精确
+
 @note_router.get("/search")
 async def search_notes(
     q: str = Query(..., description="搜索关键词"),
@@ -81,7 +85,7 @@ async def search_notes(
     notes = await init_manager.note_service.search_notes(db, user_id, q)
     return success_response(data=NoteListResponse(notes=notes, total_count=len(notes)))
 
-
+# 批量删除笔记，同时清理对应向量
 @note_router.post("/batch/delete")
 async def batch_delete_notes(
     payload: BatchIdsRequest,
@@ -95,7 +99,7 @@ async def batch_delete_notes(
     deleted = await init_manager.note_service.batch_delete_notes(db, user_id, payload.ids)
     return success_response(message=f"成功删除 {deleted} 篇笔记")
 
-
+# 批量导出笔记为 ZIP
 @note_router.post("/batch/download")
 async def batch_download_notes(
     payload: BatchIdsRequest,
@@ -120,7 +124,7 @@ async def batch_download_notes(
         }
     )
 
-
+# 批量修改笔记分类
 @note_router.put("/batch/category")
 async def batch_update_category(
     payload: BatchCategoryRequest,
@@ -134,7 +138,7 @@ async def batch_update_category(
     updated = await init_manager.note_service.batch_update_category(db, user_id, payload.ids, payload.category)
     return success_response(message=f"成功更新 {updated} 篇笔记的分类")
 
-
+# 批量置顶/取消置顶
 @note_router.put("/batch/pin")
 async def batch_pin_notes(
     payload: BatchPinRequest,
@@ -148,7 +152,7 @@ async def batch_pin_notes(
     updated = await init_manager.note_service.batch_update_pin(db, user_id, payload.ids, payload.is_pinned)
     return success_response(message=f"成功更新 {updated} 篇笔记的置顶状态")
 
-
+# 获取笔记分类统计，比如每个分类多少篇
 @note_router.get("/stats")
 async def get_stats(
     user_id: str = Depends(get_current_user_id),
@@ -161,7 +165,7 @@ async def get_stats(
     stats = await init_manager.note_service.get_category_stats(db, user_id)
     return success_response(data=stats)
 
-
+# 删除某个分类以及分类下所有笔记
 @note_router.delete("/category/{category}")
 async def delete_category(
     category: str,
@@ -181,7 +185,7 @@ class AutocompleteRequest(BaseModel):
     """内联补全请求模型"""
     context: str
 
-
+# AI 内联补全，根据当前上下文生成续写文本
 @note_router.post("/autocomplete")
 async def autocomplete(
     payload: AutocompleteRequest,

@@ -128,6 +128,7 @@ class VectorStoreService:
         分数越高表示与用户知识库越相关，用于路由层判断是否需要 RAG 前置管线。
         """
         try:
+            # 拿用户当前对话去向量库进行检索返回1条最相似
             results = await asyncio.to_thread(
                 self.vectors_store.similarity_search_with_score,
                 query,
@@ -136,8 +137,8 @@ class VectorStoreService:
             )
             if not results:
                 return 0.0
-            distance = results[0][1]
-            return 1 / (1 + distance)
+            distance = results[0][1]  # 取出 chroma 返回的 L2距离
+            return 1 / (1 + distance)  # 距离 → 转换成 0~1 的相关性分数
         except Exception:
             return 0.0
 

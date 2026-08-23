@@ -22,9 +22,12 @@ from app.utils.image_extractor import get_image_storage_dir
 knowledge_router = APIRouter(prefix="/knowledge", tags=["knowledge"])
 
 
+# 上传知识库
 @knowledge_router.post("/add/single")
 async def add_vector_single(
         file: UploadFile = File(...),
+
+        # 鉴权
         user_id: str = Depends(get_current_user_id),
         knowledge_service: KnowledgeService = Depends(get_knowledge_service),
         _: None = Depends(rate_limit(limit=5, window=60))
@@ -33,7 +36,7 @@ async def add_vector_single(
     filename = await knowledge_service.handle_add_vector_single(file, user_id)
     return success_response(message=f"文件 {filename} 已成功上传并存储到向量数据库")
 
-
+# 上传单个文件，把文件解析、切片、向量化后写入 ChromaDB
 @knowledge_router.post("/add/multiple")
 async def add_vector_multiple(
         files: list[UploadFile] = File(..., description="要上传的文件列表，仅支持PDF和TXT格式"),
@@ -45,7 +48,12 @@ async def add_vector_multiple(
     filenames = await knowledge_service.handle_add_vector_multiple(files, user_id)
     return success_response(message=f"文件 {filenames} 已成功上传并存储到向量数据库")
 
-
+# 批量上传多个文件，普通 JSON 返回。
+"""
+多文件时使用线程池，参数策略为文件数为切片任务数与 CPU 核心数两者的较小值，且强制至少为 1
+切片的数进入队列由主线程完成入库
+切片的业务属性为use_id,file_name,md5
+"""
 @knowledge_router.post("/add/multiple/stream")
 async def add_vector_multiple_stream(
         files: list[UploadFile] = File(..., description="要上传的文件列表，仅支持PDF、TXT、MD、PPTX、DOCX格式"),
@@ -53,7 +61,30 @@ async def add_vector_multiple_stream(
         knowledge_service: KnowledgeService = Depends(get_knowledge_service),
         _: None = Depends(rate_limit(limit=3, window=60))
 ):
-    """上传多个文件，流式返回处理进度，仅支持TXT、PDF、MD、PPTX、DOCX"""
+    """
+    上传多个文件，流式返回处理进度，仅支持TXT、PDF、MD、PPTX、DOCX
+
+    内部链路（SSE 流式返回每一步进度）：
+      1. 验证：_validate_and_read_files 校验 MIME/扩展名与总大小
+      2. 切片：_start_slicing 用 ThreadPoolExecutor 并行切片
+         └─ 每个工作线程执行 _sync_slice_file：
+            a) get_file_document_sync 按扩展名分发到不同 loader 读取（见下表）
+            b) split_documents_sync  统一走 AsyncTextSplitter 切割
+      3. 写入：_process_slice_results 串行消费切片队列 → ChromaDB.add_documents → 记录 MD5
+
+    不同文件类型的读取差异（loader 层），切分阶段统一：
+      .txt   → TextLoader                     整篇 → 1 个 Document
+      .md    → UnstructuredMarkdownLoader      整篇 → 1 个 Document
+      .pptx  → UnstructuredPowerPointLoader    整篇 → 1 个 Document
+      .docx  → TextLoader（注意：当前实现有缺陷，会读到二进制乱码）
+      .pdf   → pdf_multimodal_loader（自研）   按页 → N 个 Document（含视觉描述）
+      .pdf   → 回退 UnstructuredPDFLoader/PyPDFLoader  按页 → N 个 Document
+
+    所有类型读取后统一进入 AsyncTextSplitter：
+      chunk_size=1000, chunk_overlap=50
+      分隔符优先级: ["\\n\\n", "\\n", "。", "！", "？", "!", "?", " ", ""]
+      + 可选的语义相似度合并（相邻 chunk 余弦相似度 > 0.7 则合并）
+    """
     return StreamingResponse(
         knowledge_service.handle_add_vector_multiple_stream(files, user_id),
         media_type="text/event-stream",
@@ -64,14 +95,14 @@ async def add_vector_multiple_stream(
         }
     )
 
-
+# 2. 清空/删除知识库数据
 @knowledge_router.delete("/clean")
 async def clean_user_vectors(user_id: str = Depends(get_current_user_id), knowledge_service: KnowledgeService = Depends(get_knowledge_service)):
     """删除用户上传的所有向量"""
     await knowledge_service.clean_user_upload(user_id)
     return success_response(message="已成功删除用户上传的所有向量")
 
-
+# 根据 MD5 删除某一个文档记录和对应向量
 @knowledge_router.delete("/md5/clear")
 async def clear_user_md5(
         delete_documents: bool = True,
@@ -88,7 +119,7 @@ async def clear_user_md5(
     else:
         return success_response(message="已成功清空用户的MD5记录（保留知识库文档）")
 
-
+# 清空当前用户的 MD5 记录，可选择是否同时删除知识库文档。
 @knowledge_router.delete("/md5/delete/{md5_value}")
 async def delete_single_md5(
         md5_value: str,
@@ -178,7 +209,7 @@ async def get_user_knowledge_list(
         total_count=len(documents)
     ))
 
-
+# 获取当前用户的知识库文档列表，比如文件名、切片数量、预览内容。
 @knowledge_router.get("/detail", response_model=KnowledgeDocumentDetail)
 async def get_document_detail(
         filename: str,
@@ -190,7 +221,7 @@ async def get_document_detail(
     document = await knowledge_service.handle_get_document_detail(user_id, filename)
     return success_response(data=document)
 
-
+# 获取某个文档的完整详情，包括内容、切片、图片等。
 @knowledge_router.get("/chunks", response_model=DocumentChunksResponse)
 async def get_document_chunks(
         filename: str,

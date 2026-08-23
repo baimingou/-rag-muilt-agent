@@ -13,10 +13,14 @@ from app.core.success_response import success_response
 from app.router.chat_service import ChatService, get_router_service
 from app.schemas.models import QueryRequest, RAGRequest, RAGResponse, ReorderRequest, ReorderResponse, SessionResponse
 from app.utils.auth_utils import get_current_user_id
-
+from app.core.logger_handler import logger
+from app.rag.vector_store import VectorStoreService
+from app.rag.rag_service import RagService
 chat_router = APIRouter(prefix="/chat", tags=["chat"])
 
 
+
+# AI Agent 对话流式接口，前端 AI 聊天主要入口
 @chat_router.post("/agent/query/stream")
 async def query_stream(
         request: QueryRequest,
@@ -24,14 +28,13 @@ async def query_stream(
         _: None = Depends(rate_limit(limit=10, window=60))
 ):
     """查询Agent流式响应"""
+    # 生成查询session_id
     session_id = request.session_id or str(uuid.uuid4())
 
-    from app.core.logger_handler import logger
-    from app.rag.vector_store import VectorStoreService
-
+    # 创建向量库服务对象
     vector_store = VectorStoreService()
 
-    # ---- 路由判断（快速，~50ms）----
+    # ---- 路由判断（快速，~50ms）----判断要不要走 RAG
     score = await vector_store.compute_route_score(
         request.query, user_id
     )
@@ -66,19 +69,41 @@ async def query_stream(
         rag_context = ""
 
         if score > 0.5:
-            from app.rag.rag_service import RagService
 
-            # RAG 管线与 SSE 推送共用的队列
+
+            # RAG 管线与 SSE 推送共用的队列     核心异步队列 & 事件标记
             thinking_queue = asyncio.Queue()
             rag_done = asyncio.Event()
 
+            """RAG 内部每完成一个阶段
+              -> 调 thinking_callback
+              -> 把事件放入 thinking_queue
+              -> 外层从 queue 取出
+              -> yield 给前端"""
             async def thinking_callback(data: dict):
+                #让 RAG 服务内部，在各个关键节点，把「思考事件」丢进 thinking_queue 异步队列。
                 await thinking_queue.put(data)
 
             async def run_rag_pipeline():
                 """在后台执行 RAG 管线，thinking 事件通过队列实时推送"""
                 try:
+                    # 后台输出模板            创建对象
+                    """        
+                    HyDE 查询扩展
+                    混合检索
+                    笔记检索
+                    文档重排序
+                    RAG 总结
+                    过程事件回调"""
                     rag_service = RagService(user_id, thinking_callback=thinking_callback)
+
+                    """初始化混合检索器
+                    调用 LLM 生成 HyDE 假设文档
+                    用 HyDE 文档检索知识库
+                    同时检索用户笔记
+                    给结果标记 source_type
+                    合并知识库文档和笔记文档
+                    返回候选 documents"""
                     documents = await rag_service.retrieve_document(request.query)
 
                     def _format_doc(doc):
@@ -88,8 +113,10 @@ async def query_stream(
                         else:
                             filename = doc.metadata.get("original_filename", "知识库文档")
                             return f"[来源：知识库《{filename}》]\n{doc.page_content}"
-
+        # 将对象转换为文本
                     doc_contents = [_format_doc(doc) for doc in documents]
+
+                    # 使用Rerank排序
                     reordered = await rag_service.reorder_documents(request.query, doc_contents)
                     nonlocal rag_context
                     rag_context = "\n\n".join(reordered[:3])
@@ -137,6 +164,8 @@ async def query_stream(
     )
 
 
+# 学习计划流式生成接口，走 Planner-Reviewer 工作流
+
 @chat_router.post("/agent/study-plan/stream")
 async def study_plan_stream(
         request: QueryRequest,
@@ -156,7 +185,7 @@ async def study_plan_stream(
         },
     )
 
-
+# 普通 RAG 问答接口，非 Agent 流式
 @chat_router.post("/rag/query", response_model=RAGResponse)
 async def query_rag(
         request: RAGRequest,
@@ -168,28 +197,32 @@ async def query_rag(
     response = await router_service.handle_rag_query(request.query, user_id)
     return success_response(data=RAGResponse(response=response))
 
-
+# 获取某个会话历史
 @chat_router.get("/session/{session_id}", response_model=SessionResponse)
-async def get_session(session_id: str, user_id: str = Depends(get_current_user_id), router_service: ChatService = Depends(get_router_service)):
+async def get_session(
+        session_id: str,
+        user_id: str = Depends(get_current_user_id),
+        router_service: ChatService = Depends(get_router_service)
+):
     """获取会话信息，使用user_id验证"""
     history = await router_service.handle_get_session(session_id, user_id)
     return success_response(data=SessionResponse(session_id=session_id, history=history))
 
-
+# 删除某个会话
 @chat_router.delete("/session/{session_id}")
 async def delete_session(session_id: str, user_id: str = Depends(get_current_user_id), router_service: ChatService = Depends(get_router_service)):
     """删除会话"""
     await router_service.handle_delete_session(session_id, user_id)
     return success_response(message=f"Session {session_id} deleted successfully")
 
-
+# 获取所有会话 ID
 @chat_router.get("/sessions")
 async def get_all_sessions(router_service: ChatService = Depends(get_router_service)):
     """获取所有会话ID"""
     session_ids = await router_service.handle_get_all_sessions()
     return success_response(data={"sessions": session_ids})
 
-
+# 获取某个用户的会话列表
 @chat_router.get("/sessions/{user_id}")
 async def get_user_sessions(
     user_id: str,
@@ -200,7 +233,7 @@ async def get_user_sessions(
     session_ids = await router_service.handle_get_user_sessions(user_id, current_user_id)
     return success_response(data={"sessions": session_ids})
 
-
+# 文档重排序接口，用本地 reranker 对候选文档排序
 @chat_router.post("/reorder", response_model=ReorderResponse)
 async def reorder_documents(
         request: ReorderRequest,

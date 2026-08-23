@@ -45,6 +45,7 @@ class RagService:
                     }
                 })
 
+            #    创建混合检索器
             self.retriever = await self.vector_store.get_retriever(query, self.user_id)
 
 
@@ -85,6 +86,13 @@ class RagService:
         try:
             # 确保检索器已初始化，传递query参数
             if self.retriever is None:
+
+                # 主要执行逻辑   包括检索权重以及bm25向量检索的结果
+                """计算动态权重
+                创建向量检索器
+                创建 BM25 检索器
+                用 EnsembleRetriever 融合两路检索器
+                """
                 await self.initialize_retriever(query)
 
             # 使用HyDE技术生成假设性文档
@@ -119,6 +127,7 @@ class RagService:
                     "content": "正在向量数据库中检索相关文档..."
                 })
 
+            # 单独检索知识库文档
             documents = await self.retriever.ainvoke(hypothetical_doc)
 
             # 同时检索笔记库
