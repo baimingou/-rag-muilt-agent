@@ -82,15 +82,12 @@ class AsyncTextSplitter:
         return split_docs
 
     def split_documents_sync(self, documents: list[Any]) -> list[Any]:
-        """
-        同步分割文档列表（用于多线程场景）
-
-        Args:
-            documents: 文档对象列表
-
-        Returns:
-            List[Any]: 分割后的文档对象列表
-        """
+        """同步分割文档列表（用于多线程场景）"""
+        # 直接调 LangChain 的 RecursiveCharacterTextSplitter.split_documents
+        # 按 chunk_size=1000, chunk_overlap=50 切分
+        # 分隔符优先级: \n\n → \n → 。 → ！？!? → 空格 → 空字符串
+        # 注意：此方法只做递归字符切分，不做语义合并（语义合并在 split_text_sync 中才有）
+        # 每个 Document 的 page_content 独立切分，不会跨 Document 拼接
         return self.splitter.split_documents(documents)
 
     def split_text_sync(self, text: str) -> list[str]:

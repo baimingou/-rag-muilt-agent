@@ -50,57 +50,33 @@ class ProcessingState:
 
 
 def _sync_slice_file(file_content: bytes, filename: str, file_index: int, user_id: str, queue: TaskQueue):
-    """
-    在 ThreadPoolExecutor 中执行的同步切片函数（每个文件一个任务）。
-
-    两阶段设计：读取阶段按扩展名分发到不同 loader，切分阶段统一走 AsyncTextSplitter。
-
-    阶段一 - 读取（get_file_document_sync → DocumentProcessor.get_file_document_sync）：
-        按扩展名分发，不同类型产出 Document 粒度不同：
-        - .txt/.md/.pptx/.docx：整篇 → 1 个 Document（page_content 为全文）
-        - .pdf：按页 → N 个 Document（每页一个，多模态版还会混入视觉描述）
-        注：此处 .docx 当前用 TextLoader 读取，无法正确解析 Word 二进制格式（已知缺陷）。
-
-    阶段二 - 切分（split_documents_sync → AsyncTextSplitter.split_documents_sync）：
-        对阶段一产出的每个 Document 独立切分，参数统一：
-        - chunk_size=1000, chunk_overlap=50
-        - 递归字符切分：优先按段落 \\n\\n → 换行 \\n → 中文句号。 → 标点！？!? → 空格
-        - 若初始化时传了 embedding_model，还会做语义合并：
-          相邻 chunk 余弦相似度 > 0.7 视为同一观点，合并为一块。
-
-    产出：每个 Document 被切成若干 ≤1000 字的 chunk，附带 metadata 写入向量库。
-    """
+    """在 ThreadPoolExecutor 中执行的同步切片函数（每个文件一个任务）"""
     try:
-        # 把上传内容写入临时文件（保留原扩展名，loader 依赖扩展名分发）
+        # 写入临时文件，保留原扩展名（loader 依赖扩展名分发）
         with tempfile.NamedTemporaryFile(delete=False, suffix=os.path.splitext(filename)[1]) as temp_file:
             temp_file.write(file_content)
             temp_file_path = temp_file.name
 
         try:
-            # 在加载文档之前计算 md5，因为多模态PDF加载器需要 md5 来确定图片的存储路径。
-            # 如果后移（等切片完再算），多模态加载器就无法将图片保存到正确的位置。
+            # 先算 md5：多模态 PDF 加载器需要 md5 定位图片存储路径，必须前置
             md5_hex = get_file_md5_hex_sync(temp_file_path)
             store = VectorStoreService()
 
-            # === 阶段一：读取 ===
-            # 按扩展名分发到不同 loader：
-            #   .txt → txt_loader_sync          (TextLoader, 多编码尝试)
-            #   .md  → markdown_loader_sync      (UnstructuredMarkdownLoader, mode=single)
-            #   .pptx→ ppt_loader_sync           (UnstructuredPowerPointLoader, mode=single)
-            #   .docx→ word_loader_sync          (TextLoader, 当前有缺陷)
-            #   .pdf → pdf_multimodal_loader_sync(多模态: 按页+视觉模型) 或 pdf_loader_sync(回退)
-            # 上述 loader 返回 list[Document]，不同类型粒度不同（整篇 vs 按页）
+            # 阶段一·读取：get_file_document_sync 按扩展名分发到不同 loader
+            #   .txt  → TextLoader                 整篇 → 1 个 Document
+            #   .md   → UnstructuredMarkdownLoader  整篇 → 1 个 Document
+            #   .pptx → UnstructuredPowerPointLoader 整篇 → 1 个 Document
+            #   .docx → TextLoader（有缺陷，读到乱码）
+            #   .pdf  → pdf_multimodal_loader_sync  按页 → N 个 Document（含视觉描述）
             documents = store.get_file_document_sync(temp_file_path, md5=md5_hex, user_id=user_id)
             if not documents:
                 queue.put(SliceResult.error_result(file_index=file_index, filename=filename, error="文件加载为空"))
                 return
 
-            # === 阶段二：切分（统一） ===
-            # 不论哪种类型产出的 Document，都走同一个 AsyncTextSplitter：
-            #   1. RecursiveCharacterTextSplitter 按 1000 字 + 50 字 overlap 切分
-            #      分隔符优先级: \\n\\n → \\n → 。→ ！？!? → 空格 → 空字符串
-            #   2. （可选）语义合并：相邻 chunk 算 embedding 余弦相似度，>0.7 则合并
-            # 注意：PDF 因 loader 层已按页拆分，此处是对"每页内容"单独切分，不会跨页拼接
+            # 阶段二·切分：统一走 AsyncTextSplitter（RecursiveCharacterTextSplitter）
+            #   chunk_size=1000, chunk_overlap=50
+            #   分隔符优先级: \n\n → \n → 。 → ！？!? → 空格 → 空字符串
+            #   每个 Document 独立切分；PDF 因 loader 已按页拆分，此处对"每页内容"单独切，不会跨页
             split_docs = store.split_documents_sync(documents)
 
             if not split_docs:
@@ -110,7 +86,7 @@ def _sync_slice_file(file_content: bytes, filename: str, file_index: int, user_i
             # 为每个 chunk 打上归属标记，便于后续按用户/按文件过滤检索
             for doc in split_docs:
                 doc.metadata['user_id'] = user_id           # 归属用户，检索时按 user_id 过滤
-                doc.metadata['original_filename'] = filename # 原始文件名（用户可见），source 可能是临时路径
+                doc.metadata['original_filename'] = filename # 原始文件名（用户可见，source 可能是临时路径）
                 doc.metadata['md5'] = md5_hex                # 文件唯一标识（文件名可能重复，md5 不会）
 
             queue.put(SliceResult.success_result(
@@ -340,20 +316,21 @@ class KnowledgeService:
         self, valid_files: list[dict], user_id: str
     ) -> tuple[TaskQueue, ThreadPoolExecutor, list]:
         """启动多线程切片，返回 (队列, 执行器, future列表)"""
-        queue = TaskQueue(maxsize=10)
+        queue = TaskQueue(maxsize=10)  # 切片结果队列，主协程从这里消费
         queue.set_total_count(len(valid_files))
 
+        # 每个文件组装成一个任务参数：文件内容 + 文件名 + 索引 + 用户ID
         slice_tasks = [
             (info['content'], info['filename'], info['file_index'], user_id)
             for info in valid_files
         ]
-        # 线程池最大线程数取待切片任务数与 CPU 核心数两者的较小值，且强制至少为 1。线程池参数
+        # 线程池大小 = min(任务数, CPU核数)，至少 1
         max_workers = min(len(slice_tasks), max(1, os.cpu_count() or 1))
         logger.info(f"【SSE上传】切片阶段使用 {max_workers} 个线程")
 
         executor = ThreadPoolExecutor(max_workers=max_workers)
 
-        # 实现切片逻辑  递归字符切割
+        # 每个文件一个任务，_sync_slice_file 内部完成：读取(按扩展名分发) → 切分(统一 splitter) → 入队
         futures = [executor.submit(_sync_slice_file, *args, queue) for args in slice_tasks]
 
         return queue, executor, futures
@@ -363,6 +340,8 @@ class KnowledgeService:
         state: ProcessingState, user_id: str
     ) -> AsyncGenerator[str, None]:
         """消费切片队列 → 写入向量库 → yield SSE 进度事件"""
+        # 工作线程把"读取+切分"结果放入队列，本协程串行取出写入
+        # 串行是为了避免 ChromaDB 并发写冲突
         while state.written_count < valid_count:
             try:
                 result = queue.get(block=True, timeout=0.1)
@@ -408,9 +387,7 @@ class KnowledgeService:
         files: list[UploadFile],
         user_id: str
     ) -> AsyncGenerator[str, None]:
-        """
-        处理多个文件上传并返回流式进度（多线程切片 + 单线程串行写入）
-        """
+        """处理多个文件上传并返回流式进度（多线程切片 + 单线程串行写入）"""
         total_files = len(files)
         logger.info(f"【SSE上传】开始处理文件上传，文件数量: {total_files}，用户ID: {user_id}")
 

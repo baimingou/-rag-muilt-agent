@@ -59,24 +59,28 @@ class DocumentProcessor:
             return []
 
     def get_file_document_sync(self, read_path: str, md5: str = None, user_id: str = None) -> list[Document]:
-        """同步加载文件（用于多线程场景）"""
-        if read_path.endswith('.txt'):
+        """同步加载文件（用于多线程场景），按扩展名分发到不同 loader"""
+        if read_path.endswith('.txt'):                      # .txt → TextLoader，整篇 → 1 个 Document（多编码尝试）
             return txt_loader_sync(read_path)
-        elif read_path.endswith('.pdf'):
-            if md5 and user_id:
-                return pdf_multimodal_loader_sync(read_path, md5, user_id)
-            return pdf_loader_sync(read_path)
-        elif read_path.endswith('.md'):
+        elif read_path.endswith('.pdf'):                   # .pdf → 多模态加载器，按页 → N 个 Document
+            if md5 and user_id:                             # 多模态需要 md5 定位图片存储路径 data/extracted_images/{user_id}/{md5}/
+                return pdf_multimodal_loader_sync(read_path, md5, user_id)  # 含视觉描述，按页拆分
+            return pdf_loader_sync(read_path)               # 回退：纯文本按页加载（无图片/视觉描述）
+        elif read_path.endswith('.md'):                     # .md → UnstructuredMarkdownLoader(mode=single)，整篇 → 1 个 Document
             return markdown_loader_sync(read_path)
-        elif read_path.endswith('.pptx'):
+        elif read_path.endswith('.pptx'):                   # .pptx → UnstructuredPowerPointLoader(mode=single)，整篇 → 1 个 Document
             return ppt_loader_sync(read_path)
-        elif read_path.endswith('.docx'):
+        elif read_path.endswith('.docx'):                   # .docx → TextLoader（当前有缺陷，无法解析 Word 二进制，读到乱码）
             return word_loader_sync(read_path)
         else:
             return []
 
     def split_documents_sync(self, documents: list[Document]) -> list[Document]:
-        """同步分割文档（用于多线程场景）"""
+        """同步分割文档（用于多线程场景），统一切分入口"""
+        # 无论上游是哪种 loader 产出的 Document，都走同一个 AsyncTextSplitter
+        # 参数来自 chroma.yaml: chunk_size=1000, chunk_overlap=50
+        # 分隔符优先级: \n\n → \n → 。 → ！？!? → 空格 → 空字符串
+        # 对每个 Document 独立切分；PDF 因 loader 层已按页拆分，此处对"每页内容"单独切，不会跨页拼接
         return self.spliter.split_documents_sync(documents)
 
     async def get_document(self, files: list = None, user_id: str = None, progress_callback=None):

@@ -61,30 +61,26 @@ async def add_vector_multiple_stream(
         knowledge_service: KnowledgeService = Depends(get_knowledge_service),
         _: None = Depends(rate_limit(limit=3, window=60))
 ):
-    """
-    上传多个文件，流式返回处理进度，仅支持TXT、PDF、MD、PPTX、DOCX
-
-    内部链路（SSE 流式返回每一步进度）：
-      1. 验证：_validate_and_read_files 校验 MIME/扩展名与总大小
-      2. 切片：_start_slicing 用 ThreadPoolExecutor 并行切片
-         └─ 每个工作线程执行 _sync_slice_file：
-            a) get_file_document_sync 按扩展名分发到不同 loader 读取（见下表）
-            b) split_documents_sync  统一走 AsyncTextSplitter 切割
-      3. 写入：_process_slice_results 串行消费切片队列 → ChromaDB.add_documents → 记录 MD5
-
-    不同文件类型的读取差异（loader 层），切分阶段统一：
-      .txt   → TextLoader                     整篇 → 1 个 Document
-      .md    → UnstructuredMarkdownLoader      整篇 → 1 个 Document
-      .pptx  → UnstructuredPowerPointLoader    整篇 → 1 个 Document
-      .docx  → TextLoader（注意：当前实现有缺陷，会读到二进制乱码）
-      .pdf   → pdf_multimodal_loader（自研）   按页 → N 个 Document（含视觉描述）
-      .pdf   → 回退 UnstructuredPDFLoader/PyPDFLoader  按页 → N 个 Document
-
-    所有类型读取后统一进入 AsyncTextSplitter：
-      chunk_size=1000, chunk_overlap=50
-      分隔符优先级: ["\\n\\n", "\\n", "。", "！", "？", "!", "?", " ", ""]
-      + 可选的语义相似度合并（相邻 chunk 余弦相似度 > 0.7 则合并）
-    """
+    """上传多个文件，流式返回处理进度，仅支持TXT、PDF、MD、PPTX、DOCX"""
+    # 内部链路（SSE 流式返回每一步进度）：
+    #   1. 验证：_validate_and_read_files 校验 MIME/扩展名与总大小
+    #   2. 切片：_start_slicing 用 ThreadPoolExecutor 并行切片
+    #      └─ 每个工作线程执行 _sync_slice_file：
+    #         a) get_file_document_sync 按扩展名分发到不同 loader 读取
+    #         b) split_documents_sync  统一走 AsyncTextSplitter 切割
+    #   3. 写入：_process_slice_results 串行消费切片队列 → ChromaDB.add_documents → 记录 MD5
+    #
+    # 不同文件类型读取差异（loader 层），切分阶段统一：
+    #   .txt   → TextLoader                     整篇 → 1 个 Document
+    #   .md    → UnstructuredMarkdownLoader      整篇 → 1 个 Document
+    #   .pptx  → UnstructuredPowerPointLoader    整篇 → 1 个 Document
+    #   .docx  → TextLoader（当前有缺陷，会读到二进制乱码）
+    #   .pdf   → pdf_multimodal_loader（自研）   按页 → N 个 Document（含视觉描述）
+    #   .pdf   → 回退 UnstructuredPDFLoader/PyPDFLoader  按页 → N 个 Document
+    #
+    # 所有类型读取后统一进入 AsyncTextSplitter：
+    #   chunk_size=1000, chunk_overlap=50
+    #   分隔符优先级: \n\n → \n → 。 → ！？!? → 空格 → 空字符串
     return StreamingResponse(
         knowledge_service.handle_add_vector_multiple_stream(files, user_id),
         media_type="text/event-stream",
